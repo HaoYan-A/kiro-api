@@ -5,10 +5,14 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      # Mount token file (read-only for security)
-      - ~/.aws/sso/cache:/root/.aws/sso/cache:ro
+      # Data persistence (accounts and tokens)
+      - ./data:/app/data
       # Mount config file for easy modification
       - ./config.yaml:/app/config.yaml:ro
+    environment:
+      # Admin credentials (change in production!)
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=admin123
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]

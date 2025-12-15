@@ -8,3 +8,8 @@ __pycache__/
 .venv/
 venv/
 scripts/
+web/
+node_modules/
+*.log
+*.raw
+test_*.py

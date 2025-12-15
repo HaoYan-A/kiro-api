@@ -36,3 +36,16 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Data directory (contains tokens)
+data/
+
+# Test files
+test_*.py
+
+# Debug files
+*.raw
+
+# Node modules
+node_modules/
+web/node_modules/
