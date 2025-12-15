@@ -1,0 +1,17 @@
+services:
+  kiro-api:
+    build: .
+    container_name: kiro-api
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount token file (read-only for security)
+      - ~/.aws/sso/cache:/root/.aws/sso/cache:ro
+      # Mount config file for easy modification
+      - ./config.yaml:/app/config.yaml:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

@@ -1,0 +1,32 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+
+accounts:
+  - name: "example"
+    api_key: "sk-kiro-example-your-secret-key"
+    token_file: "~/.aws/sso/cache/kiro-auth-token.json"
+    profile_arn: "arn:aws:codewhisperer:us-east-1:YOUR_ACCOUNT_ID:profile/YOUR_PROFILE_ID"
+
+  # Add more accounts as needed
+  # - name: "account2"
+  #   api_key: "sk-kiro-account2-another-secret"
+  #   token_file: "/path/to/another/token.json"
+  #   profile_arn: "arn:aws:codewhisperer:us-east-1:xxx:profile/YYY"
+
+model_mapping:
+  # Sonnet series
+  claude-sonnet-4-20250514: "claude-sonnet-4.5"
+  claude-sonnet-4-5: "claude-sonnet-4.5"
+  claude-4-sonnet: "claude-sonnet-4.5"
+  # Opus series
+  claude-opus-4-20250514: "claude-opus-4.5"
+  claude-opus-4-5: "claude-opus-4.5"
+  claude-opus-4-5-20251101: "claude-opus-4.5"
+  claude-4-opus: "claude-opus-4.5"
+  # Haiku fallback to Sonnet
+  claude-3-5-haiku-20241022: "claude-sonnet-4.5"
+
+api:
+  codewhisperer_url: "https://q.us-east-1.amazonaws.com/generateAssistantResponse"
+  refresh_url: "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken"
