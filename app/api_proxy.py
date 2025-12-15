@@ -48,8 +48,11 @@ async def proxy_request(
     # 获取 token（自动刷新）
     token = await token_manager.get_token(account)
 
+    # 自动获取 profile_arn
+    profile_arn = await token_manager.fetch_profile_arn(account)
+
     # 构建 CodeWhisperer 请求
-    cw_request = build_codewhisperer_request(anthropic_req, account)
+    cw_request = build_codewhisperer_request(anthropic_req, profile_arn)
 
     # 准备请求头
     headers = {

@@ -15,7 +15,6 @@ class AccountConfig(BaseModel):
     name: str
     api_key: str
     token_file: str
-    profile_arn: str
 
     def get_token_file_path(self) -> Path:
         """获取 token 文件的绝对路径"""

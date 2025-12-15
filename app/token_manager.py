@@ -80,9 +80,13 @@ class TokenData:
 class TokenManager:
     """Token 管理器"""
 
+    # ListAvailableProfiles API URL
+    LIST_PROFILES_URL = "https://q.us-east-1.amazonaws.com/ListAvailableProfiles"
+
     def __init__(self):
         self._tokens: Dict[str, TokenData] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
+        self._profile_arns: Dict[str, str] = {}  # 缓存 profile_arn
 
     def _get_lock(self, account_name: str) -> asyncio.Lock:
         """获取账号对应的锁"""
@@ -188,6 +192,64 @@ class TokenManager:
             logger.info(f"Token saved to {token_path}")
         except Exception as e:
             logger.error(f"Failed to save token to {token_path}: {e}")
+
+    async def fetch_profile_arn(self, account: AccountConfig) -> str:
+        """
+        自动获取账号的 profile_arn
+
+        Args:
+            account: 账号配置
+
+        Returns:
+            profile_arn 字符串
+        """
+        # 检查缓存
+        if account.name in self._profile_arns:
+            return self._profile_arns[account.name]
+
+        # 获取 token
+        token = await self.get_token(account)
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    self.LIST_PROFILES_URL,
+                    json={},
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {token.access_token}"
+                    },
+                    timeout=30.0
+                )
+
+            if response.status_code != 200:
+                logger.error(f"ListAvailableProfiles failed: {response.status_code} - {response.text}")
+                raise ValueError(f"Failed to fetch profile_arn: {response.status_code}")
+
+            result = response.json()
+            profiles = result.get("profiles", [])
+
+            if not profiles:
+                raise ValueError(f"No profiles found for account: {account.name}")
+
+            # 使用第一个 profile
+            profile_arn = profiles[0].get("arn", "")
+            if not profile_arn:
+                raise ValueError(f"Profile ARN not found in response")
+
+            # 缓存结果
+            self._profile_arns[account.name] = profile_arn
+            logger.info(f"Fetched profile_arn for {account.name}: {profile_arn}")
+
+            return profile_arn
+
+        except httpx.RequestError as e:
+            logger.error(f"Failed to fetch profile_arn: {e}")
+            raise
+
+    def get_cached_profile_arn(self, account_name: str) -> Optional[str]:
+        """获取缓存的 profile_arn"""
+        return self._profile_arns.get(account_name)
 
 
 # 全局 TokenManager 实例

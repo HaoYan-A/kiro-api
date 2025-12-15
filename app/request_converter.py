@@ -5,7 +5,7 @@
 import uuid
 from typing import Any, Dict, List, Optional, Union
 
-from .config import AccountConfig, get_config
+from .config import get_config
 from .models import AnthropicRequest
 
 
@@ -77,14 +77,14 @@ def convert_tools(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def build_codewhisperer_request(
     anthropic_req: AnthropicRequest,
-    account: AccountConfig
+    profile_arn: str
 ) -> Dict[str, Any]:
     """
     构建 CodeWhisperer 请求
 
     Args:
         anthropic_req: Anthropic API 请求
-        account: 账号配置
+        profile_arn: AWS CodeWhisperer profile ARN
 
     Returns:
         CodeWhisperer 请求字典
@@ -105,7 +105,7 @@ def build_codewhisperer_request(
 
     # 构建基本请求结构
     cw_request = {
-        "profileArn": account.profile_arn,
+        "profileArn": profile_arn,
         "conversationState": {
             "chatTriggerType": "MANUAL",
             "conversationId": generate_uuid(),

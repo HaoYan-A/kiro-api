@@ -7,6 +7,7 @@ A Python proxy server that converts Anthropic Claude API requests to AWS CodeWhi
 - 🔄 **Anthropic API Compatible** - Drop-in replacement for Anthropic API
 - 👥 **Multi-Account Support** - Configure multiple Kiro accounts with custom API keys
 - 🔐 **Auto Token Refresh** - Automatically refreshes tokens before expiration
+- 🔑 **Auto Profile Discovery** - Automatically fetches AWS profile ARN from API
 - 🌊 **Streaming Support** - Full support for SSE streaming responses
 - 🐳 **Docker Ready** - Easy deployment with Docker Compose
 
@@ -24,7 +25,7 @@ This project is inspired by [kiro2cc](https://github.com/bestK/kiro2cc), a Go im
 ### Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/kiro-api.git
+git clone https://github.com/HaoYan-A/kiro-api.git
 cd kiro-api
 pip install -r requirements.txt
 ```
@@ -42,8 +43,9 @@ accounts:
   - name: "your-name"
     api_key: "sk-kiro-your-name-your-secret-key"
     token_file: "~/.aws/sso/cache/kiro-auth-token.json"
-    profile_arn: "arn:aws:codewhisperer:us-east-1:YOUR_ACCOUNT:profile/YOUR_PROFILE"
 ```
+
+> **Note:** The AWS profile ARN is automatically discovered from the API on first request. No manual configuration needed!
 
 ### Run
 
