@@ -72,9 +72,9 @@ async def proxy_request(
                 headers=headers
             )
 
-            # 处理认证错误
-            if response.status_code == 403 and retry_on_auth_error:
-                logger.warning("Got 403, attempting token refresh...")
+            # 处理认证错误 (401/403)
+            if response.status_code in (401, 403) and retry_on_auth_error:
+                logger.warning(f"Got {response.status_code}, attempting token refresh...")
                 token = await token_manager.get_token(account, force_refresh=True)
                 headers["Authorization"] = f"Bearer {token.access_token}"
 
