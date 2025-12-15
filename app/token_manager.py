@@ -5,7 +5,7 @@ Token 管理模块
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -138,14 +138,43 @@ class TokenManager:
             logger.error(f"Failed to read token file {token_path}: {e}")
             return None
 
+    def _read_client_credentials(self, account: AccountConfig, client_id_hash: str) -> dict:
+        """读取 client credentials 文件"""
+        token_dir = account.get_token_file_path().parent
+        credentials_path = token_dir / f"{client_id_hash}.json"
+
+        if not credentials_path.exists():
+            logger.error(f"Client credentials file not found: {credentials_path}")
+            raise ValueError(f"Client credentials file not found: {credentials_path}")
+
+        try:
+            with open(credentials_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to read client credentials: {e}")
+            raise
+
     async def _refresh_token(self, account: AccountConfig, token: TokenData) -> TokenData:
         """刷新 token"""
         config = get_config()
         refresh_url = config.api.refresh_url
 
+        # 读取 client credentials
+        if not token.client_id_hash:
+            raise ValueError("Token missing clientIdHash, cannot refresh")
+
+        credentials = self._read_client_credentials(account, token.client_id_hash)
+        client_id = credentials.get("clientId")
+        client_secret = credentials.get("clientSecret")
+
+        if not client_id or not client_secret:
+            raise ValueError("Client credentials missing clientId or clientSecret")
+
         payload = {
+            "clientId": client_id,
+            "clientSecret": client_secret,
+            "grantType": "refresh_token",
             "refreshToken": token.refresh_token,
-            "clientIdHash": token.client_id_hash,
         }
 
         try:
@@ -164,9 +193,15 @@ class TokenManager:
             result = response.json()
 
             # 更新 token 数据
+            # OIDC API 返回 expiresIn (秒), 需要转换为 ISO 时间戳
             new_data = token.to_dict().copy()
             new_data["accessToken"] = result.get("accessToken", token.access_token)
-            new_data["expiresAt"] = result.get("expiresAt", token.expires_at)
+
+            # 计算过期时间
+            expires_in = result.get("expiresIn", 3600)
+            expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+            new_data["expiresAt"] = expires_at.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
             if "refreshToken" in result:
                 new_data["refreshToken"] = result["refreshToken"]
 

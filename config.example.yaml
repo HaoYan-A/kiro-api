@@ -27,4 +27,4 @@ model_mapping:
 
 api:
   codewhisperer_url: "https://q.us-east-1.amazonaws.com/generateAssistantResponse"
-  refresh_url: "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken"
+  refresh_url: "https://oidc.us-east-1.amazonaws.com/token"
