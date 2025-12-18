@@ -478,3 +478,69 @@ def get_token_manager() -> TokenManager:
     if _token_manager is None:
         _token_manager = TokenManager()
     return _token_manager
+
+
+def estimate_input_tokens(anthropic_req) -> int:
+    """
+    估算输入 token 数量
+
+    Args:
+        anthropic_req: AnthropicRequest 对象
+
+    Returns:
+        int: 估算的输入 token 数量
+    """
+    try:
+        import tiktoken
+        encoding = tiktoken.get_encoding("cl100k_base")
+
+        text_parts = []
+
+        # System prompt
+        if anthropic_req.system:
+            if isinstance(anthropic_req.system, str):
+                text_parts.append(anthropic_req.system)
+            elif isinstance(anthropic_req.system, list):
+                for item in anthropic_req.system:
+                    if isinstance(item, dict):
+                        text_parts.append(item.get("text", ""))
+
+        # Messages
+        for msg in anthropic_req.messages:
+            content = msg.content
+            if isinstance(content, str):
+                text_parts.append(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                        elif block.get("type") == "tool_result":
+                            # 工具结果也计入
+                            result = block.get("content", "")
+                            if isinstance(result, str):
+                                text_parts.append(result)
+                            elif isinstance(result, list):
+                                for result_block in result:
+                                    if isinstance(result_block, dict):
+                                        if result_block.get("type") == "text":
+                                            text_parts.append(result_block.get("text", ""))
+
+        # Tools
+        if anthropic_req.tools:
+            text_parts.append(json.dumps(anthropic_req.tools, ensure_ascii=False))
+
+        full_text = "\n".join(text_parts)
+        tokens = len(encoding.encode(full_text))
+        logger.info(f"估算输入 tokens: {tokens}")
+        return tokens
+
+    except ImportError:
+        logger.warning("tiktoken 未安装，使用简化估算")
+        # 简化估算：每4个字符约等于1个token
+        total_chars = sum(len(str(part)) for part in text_parts if part)
+        return max(1, total_chars // 4)
+    except Exception as e:
+        logger.debug(f"Token 估算失败，使用简化方法: {e}")
+        # 简化估算
+        return len(str(anthropic_req)) // 4

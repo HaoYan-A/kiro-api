@@ -139,12 +139,92 @@ async def handle_non_streaming_request(
     return response
 
 
+async def proxy_request_streaming(
+    anthropic_req: AnthropicRequest,
+    account: AccountConfig,
+    retry_on_auth_error: bool = True
+):
+    """
+    创建流式代理请求
+
+    Args:
+        anthropic_req: Anthropic 请求
+        account: 账号配置
+        retry_on_auth_error: 是否在认证错误时重试
+
+    Returns:
+        (client, response): httpx client 和响应对象
+    """
+    config = get_config()
+    token_manager = get_token_manager()
+
+    # 获取 token（自动刷新）
+    token = await token_manager.get_token(account)
+
+    # 自动获取 profile_arn
+    profile_arn = await token_manager.fetch_profile_arn(account)
+
+    # 构建 CodeWhisperer 请求
+    cw_request = build_codewhisperer_request(anthropic_req, profile_arn)
+
+    # 准备请求头
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token.access_token}",
+        "Accept": "application/vnd.amazon.eventstream",
+    }
+
+    logger.info(f"Creating streaming request for account: {account.name}")
+    logger.debug(f"CodeWhisperer request: {json.dumps(cw_request, ensure_ascii=False)}")
+
+    # 创建 httpx 客户端
+    client = httpx.AsyncClient(timeout=120.0)
+
+    try:
+        # 使用 stream() 而不是 post()
+        response = client.stream(
+            "POST",
+            config.api.codewhisperer_url,
+            json=cw_request,
+            headers=headers
+        )
+
+        # __aenter__ 来启动连接
+        response = await response.__aenter__()
+
+        # 处理认证错误 (401/403)
+        if response.status_code in (401, 403) and retry_on_auth_error:
+            logger.warning(f"Got {response.status_code}, attempting token refresh...")
+
+            # 关闭当前响应
+            await response.aclose()
+
+            # 刷新 token
+            token = await token_manager.get_token(account, force_refresh=True)
+            headers["Authorization"] = f"Bearer {token.access_token}"
+
+            # 重新创建流式请求
+            response = client.stream(
+                "POST",
+                config.api.codewhisperer_url,
+                json=cw_request,
+                headers=headers
+            )
+            response = await response.__aenter__()
+
+        return client, response
+
+    except Exception as e:
+        await client.aclose()
+        raise
+
+
 async def handle_streaming_request(
     anthropic_req: AnthropicRequest,
     account: AccountConfig
 ) -> AsyncGenerator[str, None]:
     """
-    处理流式请求
+    处理流式请求（真实流式转发）
 
     Args:
         anthropic_req: Anthropic 请求
@@ -153,103 +233,48 @@ async def handle_streaming_request(
     Yields:
         SSE 格式的字符串
     """
-    config = get_config()
-    message_id = generate_message_id()
+    from .stream_handler import StreamHandler
+    from .token_manager import estimate_input_tokens
 
-    # 发送 message_start 事件
-    message_start = {
-        "type": "message_start",
-        "message": {
-            "id": message_id,
-            "type": "message",
-            "role": "assistant",
-            "content": [],
-            "model": anthropic_req.model,
-            "stop_reason": None,
-            "stop_sequence": None,
-            "usage": {
-                "input_tokens": len(get_message_content(
-                    anthropic_req.messages[0].content if anthropic_req.messages else ""
-                )),
-                "output_tokens": 1,
-                "cache_creation_input_tokens": 0,
-                "cache_read_input_tokens": 0,
-                "service_tier": "standard"
+    # 估算输入 tokens
+    input_tokens = estimate_input_tokens(anthropic_req)
+
+    # 创建流式处理器
+    handler = StreamHandler(
+        model=anthropic_req.model,
+        input_tokens=input_tokens
+    )
+
+    # 创建流式请求
+    try:
+        client, response = await proxy_request_streaming(anthropic_req, account)
+    except Exception as e:
+        logger.error(f"Failed to create streaming request: {e}")
+        error_event = {
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": f"Failed to create request: {str(e)}"
             }
         }
-    }
-    yield f"event: message_start\ndata: {json.dumps(message_start, ensure_ascii=False)}\n\n"
+        yield f"event: error\ndata: {json.dumps(error_event, ensure_ascii=False)}\n\n"
+        return
 
-    # 发送 ping 事件
-    yield f"event: ping\ndata: {json.dumps({'type': 'ping'})}\n\n"
-
-    # 发送 content_block_start 事件
-    content_block_start = {
-        "type": "content_block_start",
-        "index": 0,
-        "content_block": {
-            "type": "text",
-            "text": ""
-        }
-    }
-    yield f"event: content_block_start\ndata: {json.dumps(content_block_start, ensure_ascii=False)}\n\n"
-
-    # 代理请求
     try:
-        status_code, headers, body = await proxy_request(anthropic_req, account)
-
-        if status_code != 200:
+        if response.status_code != 200:
             error_event = {
                 "type": "error",
                 "error": {
                     "type": "api_error",
-                    "message": f"CodeWhisperer returned status {status_code}"
+                    "message": f"CodeWhisperer returned status {response.status_code}"
                 }
             }
             yield f"event: error\ndata: {json.dumps(error_event, ensure_ascii=False)}\n\n"
             return
 
-        # 解析并流式发送事件
-        events = parse_binary_events(body)
-        output_tokens = 0
-
-        for event in events:
-            if not event.event or event.data is None:
-                continue
-
-            if event.event == "content_block_delta":
-                delta = event.data.get("delta", {})
-                if delta.get("type") == "text_delta":
-                    output_tokens += len(delta.get("text", ""))
-
-            yield event.to_sse_string()
-
-            # 随机延时模拟流式输出
-            await asyncio.sleep(random.uniform(0.05, 0.15))
-
-        # 发送 content_block_stop 事件
-        content_block_stop = {
-            "type": "content_block_stop",
-            "index": 0
-        }
-        yield f"event: content_block_stop\ndata: {json.dumps(content_block_stop, ensure_ascii=False)}\n\n"
-
-        # 发送 message_delta 事件
-        message_delta = {
-            "type": "message_delta",
-            "delta": {
-                "stop_reason": "end_turn",
-                "stop_sequence": None
-            },
-            "usage": {
-                "output_tokens": output_tokens
-            }
-        }
-        yield f"event: message_delta\ndata: {json.dumps(message_delta, ensure_ascii=False)}\n\n"
-
-        # 发送 message_stop 事件
-        message_stop = {"type": "message_stop"}
-        yield f"event: message_stop\ndata: {json.dumps(message_stop, ensure_ascii=False)}\n\n"
+        # 真实流式转发
+        async for sse_event in handler.handle_stream(response.aiter_bytes()):
+            yield sse_event
 
     except Exception as e:
         logger.error(f"Streaming request failed: {e}")
@@ -261,6 +286,16 @@ async def handle_streaming_request(
             }
         }
         yield f"event: error\ndata: {json.dumps(error_event, ensure_ascii=False)}\n\n"
+    finally:
+        # 确保资源被正确释放
+        try:
+            await response.aclose()
+        except:
+            pass
+        try:
+            await client.aclose()
+        except:
+            pass
 
 
 # ==================== 通过账号名称处理请求（支持存储系统）====================
@@ -376,12 +411,92 @@ async def handle_non_streaming_request_by_name(
     return response
 
 
+async def proxy_request_streaming_by_name(
+    anthropic_req: AnthropicRequest,
+    account_name: str,
+    retry_on_auth_error: bool = True
+):
+    """
+    通过账号名称创建流式代理请求（从存储系统读取）
+
+    Args:
+        anthropic_req: Anthropic 请求
+        account_name: 账号名称
+        retry_on_auth_error: 是否在认证错误时重试
+
+    Returns:
+        (client, response): httpx client 和响应对象
+    """
+    config = get_config()
+    token_manager = get_token_manager()
+
+    # 获取 token（从存储系统，自动刷新）
+    token = await token_manager.get_token_by_name(account_name)
+
+    # 自动获取 profile_arn
+    profile_arn = await token_manager.fetch_profile_arn_by_name(account_name)
+
+    # 构建 CodeWhisperer 请求
+    cw_request = build_codewhisperer_request(anthropic_req, profile_arn)
+
+    # 准备请求头
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token.access_token}",
+        "Accept": "application/vnd.amazon.eventstream",
+    }
+
+    logger.info(f"Creating streaming request for account: {account_name} (from storage)")
+    logger.debug(f"CodeWhisperer request: {json.dumps(cw_request, ensure_ascii=False)}")
+
+    # 创建 httpx 客户端
+    client = httpx.AsyncClient(timeout=120.0)
+
+    try:
+        # 使用 stream() 而不是 post()
+        response = client.stream(
+            "POST",
+            config.api.codewhisperer_url,
+            json=cw_request,
+            headers=headers
+        )
+
+        # __aenter__ 来启动连接
+        response = await response.__aenter__()
+
+        # 处理认证错误 (401/403)
+        if response.status_code in (401, 403) and retry_on_auth_error:
+            logger.warning(f"Got {response.status_code}, attempting token refresh...")
+
+            # 关闭当前响应
+            await response.aclose()
+
+            # 刷新 token
+            token = await token_manager.get_token_by_name(account_name, force_refresh=True)
+            headers["Authorization"] = f"Bearer {token.access_token}"
+
+            # 重新创建流式请求
+            response = client.stream(
+                "POST",
+                config.api.codewhisperer_url,
+                json=cw_request,
+                headers=headers
+            )
+            response = await response.__aenter__()
+
+        return client, response
+
+    except Exception as e:
+        await client.aclose()
+        raise
+
+
 async def handle_streaming_request_by_name(
     anthropic_req: AnthropicRequest,
     account_name: str
 ) -> AsyncGenerator[str, None]:
     """
-    通过账号名称处理流式请求
+    通过账号名称处理流式请求（真实流式转发）
 
     Args:
         anthropic_req: Anthropic 请求
@@ -390,102 +505,48 @@ async def handle_streaming_request_by_name(
     Yields:
         SSE 格式的字符串
     """
-    message_id = generate_message_id()
+    from .stream_handler import StreamHandler
+    from .token_manager import estimate_input_tokens
 
-    # 发送 message_start 事件
-    message_start = {
-        "type": "message_start",
-        "message": {
-            "id": message_id,
-            "type": "message",
-            "role": "assistant",
-            "content": [],
-            "model": anthropic_req.model,
-            "stop_reason": None,
-            "stop_sequence": None,
-            "usage": {
-                "input_tokens": len(get_message_content(
-                    anthropic_req.messages[0].content if anthropic_req.messages else ""
-                )),
-                "output_tokens": 1,
-                "cache_creation_input_tokens": 0,
-                "cache_read_input_tokens": 0,
-                "service_tier": "standard"
+    # 估算输入 tokens
+    input_tokens = estimate_input_tokens(anthropic_req)
+
+    # 创建流式处理器
+    handler = StreamHandler(
+        model=anthropic_req.model,
+        input_tokens=input_tokens
+    )
+
+    # 创建流式请求
+    try:
+        client, response = await proxy_request_streaming_by_name(anthropic_req, account_name)
+    except Exception as e:
+        logger.error(f"Failed to create streaming request: {e}")
+        error_event = {
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": f"Failed to create request: {str(e)}"
             }
         }
-    }
-    yield f"event: message_start\ndata: {json.dumps(message_start, ensure_ascii=False)}\n\n"
+        yield f"event: error\ndata: {json.dumps(error_event, ensure_ascii=False)}\n\n"
+        return
 
-    # 发送 ping 事件
-    yield f"event: ping\ndata: {json.dumps({'type': 'ping'})}\n\n"
-
-    # 发送 content_block_start 事件
-    content_block_start = {
-        "type": "content_block_start",
-        "index": 0,
-        "content_block": {
-            "type": "text",
-            "text": ""
-        }
-    }
-    yield f"event: content_block_start\ndata: {json.dumps(content_block_start, ensure_ascii=False)}\n\n"
-
-    # 代理请求
     try:
-        status_code, headers, body = await proxy_request_by_name(anthropic_req, account_name)
-
-        if status_code != 200:
+        if response.status_code != 200:
             error_event = {
                 "type": "error",
                 "error": {
                     "type": "api_error",
-                    "message": f"CodeWhisperer returned status {status_code}"
+                    "message": f"CodeWhisperer returned status {response.status_code}"
                 }
             }
             yield f"event: error\ndata: {json.dumps(error_event, ensure_ascii=False)}\n\n"
             return
 
-        # 解析并流式发送事件
-        events = parse_binary_events(body)
-        output_tokens = 0
-
-        for event in events:
-            if not event.event or event.data is None:
-                continue
-
-            if event.event == "content_block_delta":
-                delta = event.data.get("delta", {})
-                if delta.get("type") == "text_delta":
-                    output_tokens += len(delta.get("text", ""))
-
-            yield event.to_sse_string()
-
-            # 随机延时模拟流式输出
-            await asyncio.sleep(random.uniform(0.05, 0.15))
-
-        # 发送 content_block_stop 事件
-        content_block_stop = {
-            "type": "content_block_stop",
-            "index": 0
-        }
-        yield f"event: content_block_stop\ndata: {json.dumps(content_block_stop, ensure_ascii=False)}\n\n"
-
-        # 发送 message_delta 事件
-        message_delta = {
-            "type": "message_delta",
-            "delta": {
-                "stop_reason": "end_turn",
-                "stop_sequence": None
-            },
-            "usage": {
-                "output_tokens": output_tokens
-            }
-        }
-        yield f"event: message_delta\ndata: {json.dumps(message_delta, ensure_ascii=False)}\n\n"
-
-        # 发送 message_stop 事件
-        message_stop = {"type": "message_stop"}
-        yield f"event: message_stop\ndata: {json.dumps(message_stop, ensure_ascii=False)}\n\n"
+        # 真实流式转发
+        async for sse_event in handler.handle_stream(response.aiter_bytes()):
+            yield sse_event
 
     except Exception as e:
         logger.error(f"Streaming request failed: {e}")
@@ -497,3 +558,13 @@ async def handle_streaming_request_by_name(
             }
         }
         yield f"event: error\ndata: {json.dumps(error_event, ensure_ascii=False)}\n\n"
+    finally:
+        # 确保资源被正确释放
+        try:
+            await response.aclose()
+        except:
+            pass
+        try:
+            await client.aclose()
+        except:
+            pass
